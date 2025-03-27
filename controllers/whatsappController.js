@@ -1,77 +1,98 @@
 // controllers/whatsappController.js
 import { checkWhatsAppNumber } from '../utils/whatsapp.js';
-import { setIsRegisteredInBitrix } from '../utils/bitrix.js';
+import {
+    getLastLineNumberFromContactCenter,
+    setIsRegisteredInBitrix,
+    updateContactLineId,
+} from '../utils/bitrix.js';
 import { logMessage } from '../logger/logger.js';
 import "../global.js";
 
 export const checkWhatsApp = async (req, res) => {
-    const { contact_id, phoneNumber } = req.params;
+    const { contact_id } = req.params;
 
-    // Валидация номера телефона
-    let formattedPhoneNumber = phoneNumber;
-
-    // Валидация и форматирование номера телефона
-    if (!phoneNumber) {
-        logMessage("error", "/chatapp_middleware/check_whatsapp/",
-            `No phone number provided`);
+    if (!contact_id) {
+        logMessage(LOG_TYPES.E, "/whatsapp_middleware/check_whatsapp/", `No contact ID provided`);
         return res.status(400).json({
             success: false,
-            message: 'Phone number is required',
+            message: 'Contact ID is required',
         });
     }
 
-    // Убираем все нечисловые символы
-    formattedPhoneNumber = phoneNumber.replace(/\D/g, '');
+    try {
+        // Обновляем типы номеров телефона в Bitrix на основе проверки WhatsApp
+        const bitrixResult = await setIsRegisteredInBitrix(contact_id);
+        if (!bitrixResult.success) {
+            logMessage("error", "/whatsapp_middleware/check_whatsapp/",
+                `Failed to update Bitrix for contact ${contact_id}: ${bitrixResult.error}`);
+            return res.status(500).json({
+                success: false,
+                message: 'Error updating contact in Bitrix',
+                error: bitrixResult.error
+            });
+        }
 
-    // Если номер начинается с 8 (Россия), заменяем на 7
-    if (formattedPhoneNumber.startsWith('8') && formattedPhoneNumber.length === 11) {
-        formattedPhoneNumber = '7' + formattedPhoneNumber.slice(1);
+        logMessage(LOG_TYPES.I, "/whatsapp_middleware/check_whatsapp/", `Whatsapp checked and fields updated in bitrix for contact - ${contact_id}`)
+
+        res.json({
+            success: true,
+            bitrixUpdated: true,
+            message: 'Contact phone types updated successfully'
+        });
+    } catch (error) {
+        logMessage("error", "/whatsapp_middleware/check_whatsapp/",
+            `Error processing request for contact ${contact_id}: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            message: 'Error processing request',
+            error: error.message
+        });
     }
+};
 
-    // Проверяем длину и формат
-    if (!/^\d{10,15}$/.test(formattedPhoneNumber)) {
-        logMessage("error", "/chatapp_middleware/check_whatsapp/",
-            `Invalid phone number after formatting: ${formattedPhoneNumber} (original: ${phoneNumber})`);
+export const updateLineId = async (req, res) => {
+    const { contact_id } = req.params;
+
+    if (!contact_id) {
         return res.status(400).json({
             success: false,
-            message: 'Invalid phone number format (e.g., 12025550123 or 79991234567)',
+            message: 'Contact ID is required'
         });
     }
 
-    // Проверка номера в WhatsApp
-    const result = await checkWhatsAppNumber(phoneNumber);
-    result.exists
-        ? logMessage(LOG_TYPES.I, "checkWhatsApp controller", `Number ${phoneNumber} for contact ${contact_id} is REGISTERED registered in whatsapp`)
-        : logMessage(LOG_TYPES.I, "checkWhatsApp controller", `Number ${phoneNumber} for contact ${contact_id} is NOT registered in whatsapp`);
+    try {
+        // Получаем информацию о последней линии, с которой контактировал клиент
+        const lineResult = await getLastLineNumberFromContactCenter(contact_id);
+        if (!lineResult.success) {
+            return res.status(400).json({
+                success: false,
+                message: 'Could not determine line number',
+                error: lineResult.error
+            });
+        }
 
-    // controllers/whatsappController.js (фрагмент)
-    if (result.success) {
-        if (contact_id) { // Обновляем Bitrix независимо от result.exists
-            try {
-                const bitrixResult = await setIsRegisteredInBitrix(contact_id, result.exists);
-                if (!bitrixResult.success) {
-                    logMessage("error", "/chatapp_middleware/check_whatsapp/",
-                        `Failed to update Bitrix for contact ${contact_id}: ${bitrixResult.error}`);
-                }
-            } catch (error) {
-                logMessage("error", "/chatapp_middleware/check_whatsapp/",
-                    `Error updating Bitrix for contact ${contact_id}: ${error.message}`);
-            }
+        const { lineId } = lineResult;
+
+        const bxUpdateResult = await updateContactLineId(contact_id, lineId);
+
+        if (bxUpdateResult) {
+            logMessage(LOG_TYPES.I, "/whatsapp_middleware/update_line_id/:ID", `Last line (${lineId}) successfully updated for contact ${contact_id}`);
+        } else {
+            throw new Error(`Error while updating last line for contact ${contact_id}`)
         }
 
         res.json({
             success: true,
-            exists: result.exists, // Теперь exists может быть true или false
-            details: result.details || {},
-            bitrixUpdated: contact_id ? true : false,
-            formattedNumber: formattedPhoneNumber,
+            message: 'Line ID retrieved successfully',
+            lineId: lineId,
+            update_result: bxUpdateResult
         });
-    } else {
-        logMessage(LOG_TYPES.E, "/chatapp_middleware/check_whatsapp/", result.error);
-        res.status(503).json({
+    } catch (error) {
+        logMessage("error", "/whatsapp_middleware/update_line_id/:ID", error.message);
+        res.status(500).json({
             success: false,
-            message: 'Error checking WhatsApp number',
-            error: result.error,
+            message: 'Error retrieving line ID',
+            error: error.message
         });
     }
 };
